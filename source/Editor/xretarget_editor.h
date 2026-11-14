@@ -502,14 +502,26 @@ namespace xretarget_editor
             if (T == m_ViewHoverDestination || (m_ViewHoverSource >= 0 && S == m_ViewHoverSource)) ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, IM_COL32(90, 140, 210, 110));       // the viewport's hover, lit in the list
             if (T == m_ScrollRow && m_ScrollRow != m_LastScrolledRow) { ImGui::SetScrollHereY(0.5f); m_LastScrolledRow = m_ScrollRow; }
             ImGui::TableNextColumn();
-            const std::string Issue = RowIssue(T);
-            if (!Issue.empty())      // a warning badge (an orange disc with a mark) the eye finds in the list; the whole badge is the hover target
+            std::string Issue = RowIssue(T);
+            const bool bYours = Overridden(Target);
+            if (bYours) Issue = std::string("Set by you: this bone's source is your correction, not the automatic guess. Open its Source box and pick (automatic) to take it back.") + (Issue.empty() ? std::string() : std::string("\n\nStill worth a look: ") + Issue);
+            if (!Issue.empty())      // a badge the eye finds in the list: orange with a mark = something to read, green with a check = your own correction; the whole badge is the hover target
             {
                 const ImVec2 C(ImGui::GetCursorScreenPos().x + 7.0f, ImGui::GetCursorScreenPos().y + ImGui::GetTextLineHeight() * 0.5f + 1.0f);
                 auto* pDL = ImGui::GetWindowDrawList();
-                pDL->AddCircleFilled(C, 6.5f, IM_COL32(235, 160, 30, 255));
-                pDL->AddLine(ImVec2(C.x, C.y - 3.5f), ImVec2(C.x, C.y + 0.5f), IM_COL32(30, 20, 0, 255), 1.8f);
-                pDL->AddCircleFilled(ImVec2(C.x, C.y + 3.0f), 1.0f, IM_COL32(30, 20, 0, 255));
+                const ImU32 Ink = IM_COL32(20, 30, 20, 255);
+                if (bYours)
+                {
+                    pDL->AddCircleFilled(C, 6.5f, IM_COL32(70, 190, 100, 255));
+                    pDL->AddLine(ImVec2(C.x - 3.0f, C.y), ImVec2(C.x - 0.8f, C.y + 2.6f), Ink, 1.8f);
+                    pDL->AddLine(ImVec2(C.x - 0.8f, C.y + 2.6f), ImVec2(C.x + 3.4f, C.y - 2.6f), Ink, 1.8f);
+                }
+                else
+                {
+                    pDL->AddCircleFilled(C, 6.5f, IM_COL32(235, 160, 30, 255));
+                    pDL->AddLine(ImVec2(C.x, C.y - 3.5f), ImVec2(C.x, C.y + 0.5f), IM_COL32(30, 20, 0, 255), 1.8f);
+                    pDL->AddCircleFilled(ImVec2(C.x, C.y + 3.0f), 1.0f, IM_COL32(30, 20, 0, 255));
+                }
                 ImGui::Dummy(ImVec2(14.0f, ImGui::GetTextLineHeight()));
                 if (ImGui::IsItemHovered()) { ImGui::SetTooltip("%s", Issue.c_str()); m_iHover = T; }
             }
