@@ -18,6 +18,7 @@
 #include "dependencies/xresource_pipeline_v2/source/editor/xresource_editor_inspector_pickers.h"
 #include "dependencies/xresource_pipeline_v2/source/editor/xresource_editor_resources.h"
 #include "plugins/xskeleton.plugin/source/Editor/xskeleton_viewport.h"
+#include "source/Tools/Editor/xeditor_transform_gizmo.h"
 #include "plugins/xretarget.plugin/source/xretarget_descriptor.h"
 #include "plugins/xretarget.plugin/source/xretarget_mapping.h"
 #include "dependencies/xAnimation/source/retarget/xanimation_mirror.h"
@@ -39,15 +40,14 @@ namespace xretarget_editor
         bool                                            m_bReady = false;
         std::vector<xskeleton_editor::bone_world>       m_SourceBones, m_DestinationBones;
         xmath::fvec3                                    m_DestinationOffset = {};
-        // the editing modes (the row above the viewport) and the placement of the two skeletons (saved in the descriptor, applied to what is drawn)
-        enum class mode { map, translate, rotate, scale };
-        mode                                            m_Mode = mode::map;
+        // the editing modes (the row above the viewport): Map drags links; Translate / Rotate / Scale are the transform gizmo (the one of the skeleton editor) on the chosen skeleton,
+        // whose placement is saved in the descriptor
+        xeditor::transform_gizmo::state                 m_Gizmo;
+        xeditor::transform_gizmo::actions               m_GizmoActions{ m_Gizmo };
+        void RegisterActions(ximgui::actions::context& Ctx) noexcept override { Ctx.Scope(m_GizmoActions, "Preview"); }
         std::vector<xskeleton_editor::bone_world>       m_SourceWorld, m_DestinationWorld;          // the rest bones as placed
         std::vector<int>                                m_SourceFrom, m_DestinationFrom;            // each bone's wedge starts at this bone (-1: none)
-        xretarget_desc::view_place                      m_Place[2];                                 // the working placement while a drag is on
-        bool                                            m_bPlaceDrag = false; int m_PlaceWho = 0, m_PlaceSel = -1;
-        xretarget_desc::view_place                      m_PlaceStart;
-        ImVec2                                          m_PlaceMouse0 = {}; xmath::fvec3 m_PlaceHit0 = {};
+        int                                             m_PlaceSel = 1;                             // the skeleton the gizmo moves: 0 source, 1 destination (click one to choose)
         float                                           m_SourceRadius = 0, m_DestinationRadius = 0;      // how big each skeleton is (a unit mismatch shows here)
         std::uint64_t                                   m_LoadedSource = 0, m_LoadedDestination = 0;     // the skeletons the viewport shows: an edit of either reloads it
 
@@ -237,6 +237,10 @@ namespace xretarget_editor
             if (!m_bLive || T < 0 || T >= static_cast<int>(m_Live.m_Destination.m_Names.size())) return;
             const std::string Target(m_Live.m_Destination.m_Names[T]);
             const std::string Source = S >= 0 ? std::string(m_Live.m_Source.m_Names[S]) : std::string();
+            // one link per bone: a source bone that already drives another target is released from it (that target stays at rest)
+            std::vector<int> Freed;
+            auto Release = [&](int Src, int Keep) { if (Src < 0) return; const auto& M = m_Live.m_Auto.m_Map.m_SourceOf; for (int o = 0; o < static_cast<int>(M.size()); ++o) if (o != Keep && M[o] == Src) Freed.push_back(o); };
+            if (Pick == pick::source) Release(S, T);
             Correct(Target, Source, Pick);
             std::string What = Pick == pick::source ? Target + " <- " + Source : Pick == pick::none ? Target + " stays at rest" : Target + " back to automatic";
             if (m_bSmartMirror)
@@ -252,6 +256,8 @@ namespace xretarget_editor
                 }
                 else if (Pick == pick::source && mT >= 0) What += "; (no mirror found for the source bone)";
             }
+            if (m_bSmartMirror && Pick == pick::source) { const int mT = xanimation::FindMirrorBone(m_Live.m_Destination.m_Names, T), mS = xanimation::FindMirrorBone(m_Live.m_Source.m_Names, S); if (mS >= 0) Release(mS, mT); }
+            for (const int o : Freed) { const std::string N(m_Live.m_Destination.m_Names[o]); Correct(N, "", pick::none); What += "; " + N + " released (one link per bone)"; }
             m_Notice = What; m_NoticeUntil = ImGui::GetTime() + 6.0;
         }
 
@@ -265,16 +271,22 @@ namespace xretarget_editor
         // Panels
         //----------------------------------------------------------------------------------------
 
-        // The placed bones of one skeleton: its rest bones turned about the vertical axis, scaled, and moved (from its default place)
+        // Where a skeleton's own space is drawn before its placement: the source at the origin, the destination beside it
+        xmath::fmat4 DisplayOf(int Who) const noexcept { return Who == 0 ? xmath::fmat4::fromIdentity() : xmath::fmat4::fromTranslation(m_DestinationOffset); }
+
+        // The placed bones of one skeleton: its rest bones through the placement (Scale, Rotation, Translation of its view place), after its default place
         void PlaceBones(int Who, const std::vector<xskeleton_editor::bone_world>& Rest, std::vector<xskeleton_editor::bone_world>& Out) const noexcept
         {
+            namespace tg = xeditor::transform_gizmo;
             const auto& V = Who == 0 ? Desc2()->m_SourceView : Desc2()->m_DestinationView;
-            const auto& W = m_bPlaceDrag ? m_Place[Who] : V;
-            const float Rad = W.m_YawDeg * 3.14159265f / 180.0f, C = std::cos(Rad), S = std::sin(Rad);
-            const xmath::fvec3 Base = Who == 0 ? xmath::fvec3(0, 0, 0) : m_DestinationOffset;
-            auto Turn = [&](const xmath::fvec3& P) { return xmath::fvec3(C * P.m_X + S * P.m_Z, P.m_Y, -S * P.m_X + C * P.m_Z); };
+            const xmath::fmat4 M = DisplayOf(Who) * tg::Matrix(tg::PreOf(V));
             Out = Rest;
-            for (auto& B : Out) { B.m_Position = Base + W.m_Move + Turn(B.m_Position * W.m_Scale); B.m_Right = Turn(B.m_Right); B.m_Up = Turn(B.m_Up); }
+            for (auto& B : Out)
+            {
+                const xmath::fvec3 P = M * B.m_Position;
+                auto Dir = [&](const xmath::fvec3& Vec) { const xmath::fvec3 D = M * (B.m_Position + Vec) - P; return D.Length() > 1.0e-12f ? D.NormalizeCopy() * Vec.Length() : Vec; };
+                B.m_Right = Dir(B.m_Right); B.m_Up = Dir(B.m_Up); B.m_Position = P;
+            }
         }
         const desc* Desc2() const noexcept { return m_Document.isLoaded() ? static_cast<const desc*>(m_Document.m_pDescriptor.get()) : nullptr; }
 
@@ -287,37 +299,22 @@ namespace xretarget_editor
             return Best >= 0 ? (W[i].m_Position + W[Best].m_Position) * 0.5f : W[i].m_Position;
         }
 
-        // Where the mouse ray meets the horizontal plane at height Y
-        xmath::fvec3 GroundHit(const ImVec2& Mouse, float Y) noexcept
-        {
-            const auto O = m_Viewport.m_Scene.m_View.getPosition(); const auto Dir = m_Viewport.m_Scene.m_View.RayFromScreen(Mouse.x, Mouse.y);
-            if (std::fabs(Dir.m_Y) < 1e-4f) return O;
-            const float T = (Y - O.m_Y) / Dir.m_Y; return O + Dir * T;
-        }
-
-        // A placement change committed to the descriptor (undoable): only the fields that moved
-        void CommitPlace(int Who) noexcept
-        {
-            const auto& Now = m_Place[Who]; const auto& Was = m_PlaceStart;
-            const char* Root = Who == 0 ? "Retarget/SourceView" : "Retarget/DestinationView";
-            auto Set = [&](const std::string& P, float V, float B) { if (V != B) xeditor::Run(m_Undo, std::format("SetProperty -Path {} -Value {} -Before {}", xeditor::Quote(P), xeditor::Quote(std::format("{}", V)), xeditor::Quote(std::format("{}", B)))); };
-            Set(std::format("{}/Move/X", Root), Now.m_Move.m_X, Was.m_Move.m_X); Set(std::format("{}/Move/Y", Root), Now.m_Move.m_Y, Was.m_Move.m_Y); Set(std::format("{}/Move/Z", Root), Now.m_Move.m_Z, Was.m_Move.m_Z);
-            Set(std::format("{}/YawDeg", Root), Now.m_YawDeg, Was.m_YawDeg); Set(std::format("{}/Scale", Root), Now.m_Scale, Was.m_Scale);
-        }
-
         void RenderViewport() noexcept
         {
-            // the modes: what the left mouse button does in the viewport
+            // the modes: Map (drag links) or one of the gizmo's tools (Translate W, Rotate E, Scale R) on the skeleton chosen by a click
             {
+                namespace tg = xeditor::transform_gizmo;
                 static const char* Names[] = { "Map", "Translate", "Rotate", "Scale" };
-                static const char* Tips[]  = { "Drag from a bone of one skeleton onto a bone of the other to map them", "Drag a skeleton to move it (hold Shift to lift it)", "Drag a skeleton sideways to turn it", "Drag a skeleton up or down to make it smaller or bigger" };
+                static const int   Tools[] = { tg::TOOL_NONE, tg::TOOL_MOVE, tg::TOOL_ROTATE, tg::TOOL_SCALE };
+                static const char* Tips[]  = { "Q: drag from a bone of one skeleton onto a bone of the other to map them", "W: move the chosen skeleton with the gizmo", "E: turn the chosen skeleton with the gizmo", "R: scale the chosen skeleton with the gizmo" };
                 for (int i = 0; i < 4; ++i)
                 {
                     if (i) ImGui::SameLine();
-                    if (ImGui::Selectable(Names[i], m_Mode == static_cast<mode>(i), 0, ImVec2(70, 0))) { m_Mode = static_cast<mode>(i); m_bDragging = false; m_bPlaceDrag = false; }
+                    if (ImGui::Selectable(Names[i], m_Gizmo.m_Tool == Tools[i], 0, ImVec2(70, 0))) { m_Gizmo.m_Tool = Tools[i]; m_bDragging = false; }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", Tips[i]);
                 }
-                ImGui::SameLine(); ImGui::TextDisabled("(how the skeletons are placed here is saved with the resource; it changes nothing that is compiled)");
+                if (m_Gizmo.m_Tool != tg::TOOL_NONE) { ImGui::SameLine(); ImGui::Text("moving the %s (click a skeleton to choose)", m_PlaceSel ? "destination" : "source"); }
+                else { ImGui::SameLine(); ImGui::TextDisabled("(where the skeletons are placed here is saved with the resource; it changes nothing that is compiled)"); }
             }
             if (auto* pDesc = Desc(); pDesc && (pDesc->m_Source.m_Instance.m_Value != m_LoadedSource || pDesc->m_Destination.m_Instance.m_Value != m_LoadedDestination)) Reload();
             m_CameraToolbar.Render(ImGui::GetContentRegionAvail(), m_Viewport.m_Scene.m_State, [this] { RenderViewportBody(); });
@@ -335,6 +332,14 @@ namespace xretarget_editor
 
             RefreshLive();
             if (!Desc2()) return;
+            namespace tg = xeditor::transform_gizmo;
+            const ImVec2 BodyMin = ImGui::GetCursorScreenPos(), BodySize = ImGui::GetContentRegionAvail();
+            tg::layer GizmoLayer(m_Gizmo, *ImGui::GetWindowDrawList());       // the gizmo over all of it
+            {
+                auto* pD = const_cast<desc*>(Desc2());
+                const bool bGizmo = tg::Run(m_Gizmo, *this, GizmoLayer, m_Viewport.m_Scene.m_View, BodyMin, BodySize, tg::TargetOf(m_PlaceSel ? pD->m_DestinationView : pD->m_SourceView), DisplayOf(m_PlaceSel));
+                m_Viewport.m_bGizmoHot = bGizmo; m_Viewport.m_bGizmoDrag = tg::Dragging();
+            }
             PlaceBones(0, m_SourceBones, m_SourceWorld); PlaceBones(1, m_DestinationBones, m_DestinationWorld);
             xskeleton_editor::viewport_item Items[2] =
             { { .m_pSkeleton = pSource,      .m_Bones = m_SourceWorld,      .m_NormalColor = IM_COL32(255, 200, 120, 255), .m_pSelected = &m_SelSource }                                          // source: warm
@@ -405,7 +410,7 @@ namespace xretarget_editor
                 for (const int T : Linked) Link(T, IM_COL32(255, 255, 255, 255), 2.5f);
 
                 // drag and drop: press on a bone of one skeleton, release on a bone of the other
-                if (m_Mode == mode::map && !m_bDragging && m_Viewport.Over() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && (iS >= 0 || iD >= 0))
+                if (m_Gizmo.m_Tool == tg::TOOL_NONE && !m_bDragging && m_Viewport.Over() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && (iS >= 0 || iD >= 0))
                 { m_bDragging = true; m_bDragFromSource = iS >= 0; m_DragBone = iS >= 0 ? iS : iD; }
                 if (m_bDragging)
                 {
@@ -452,34 +457,9 @@ namespace xretarget_editor
             }
             if (m_bDragging && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) { m_bDragging = false; m_DragBone = -1; }
 
-            // translate / rotate / scale: press on a skeleton (or anywhere, with one already chosen) and drag
-            if (m_Mode != mode::map)
-            {
-                if (m_Viewport.Over() && !m_bPlaceDrag && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-                {
-                    if (iS >= 0 || iD >= 0) m_PlaceSel = iS >= 0 ? 0 : 1;
-                    if (m_PlaceSel >= 0)
-                    {
-                        const auto* pD = Desc2();
-                        m_bPlaceDrag = true; m_PlaceWho = m_PlaceSel; m_Place[0] = pD->m_SourceView; m_Place[1] = pD->m_DestinationView;
-                        m_PlaceStart = m_Place[m_PlaceWho]; m_PlaceMouse0 = Mouse; m_PlaceHit0 = GroundHit(Mouse, 0.0f);
-                    }
-                }
-                if (m_bPlaceDrag)
-                {
-                    auto& W = m_Place[m_PlaceWho];
-                    if (m_Mode == mode::translate)
-                    {
-                        if (ImGui::GetIO().KeyShift) W.m_Move.m_Y = m_PlaceStart.m_Move.m_Y - (Mouse.y - m_PlaceMouse0.y) * 0.005f * m_Viewport.m_Scene.m_Radius;
-                        else { const auto H = GroundHit(Mouse, 0.0f); W.m_Move.m_X = m_PlaceStart.m_Move.m_X + (H.m_X - m_PlaceHit0.m_X); W.m_Move.m_Z = m_PlaceStart.m_Move.m_Z + (H.m_Z - m_PlaceHit0.m_Z); }
-                    }
-                    else if (m_Mode == mode::rotate) W.m_YawDeg = m_PlaceStart.m_YawDeg + (Mouse.x - m_PlaceMouse0.x) * 0.5f;
-                    else W.m_Scale = std::max(0.05f, m_PlaceStart.m_Scale * std::exp(-(Mouse.y - m_PlaceMouse0.y) * 0.005f));
-                    ImGui::SetTooltip("%s: move %.2f, %.2f, %.2f  turn %.1f deg  scale %.2f", m_PlaceWho ? "destination" : "source", W.m_Move.m_X, W.m_Move.m_Y, W.m_Move.m_Z, W.m_YawDeg, W.m_Scale);
-                    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) { CommitPlace(m_PlaceWho); m_bPlaceDrag = false; }
-                }
-                else if (iS >= 0 || iD >= 0) ImGui::SetTooltip("%s skeleton: press and drag to %s it", iS >= 0 ? "source" : "destination", m_Mode == mode::translate ? "move" : m_Mode == mode::rotate ? "turn" : "scale");
-            }
+            // with a gizmo tool: a click on a skeleton chooses the one the gizmo moves
+            if (m_Gizmo.m_Tool != tg::TOOL_NONE && !m_Viewport.m_bGizmoHot && m_Viewport.Over() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && (iS >= 0 || iD >= 0)) m_PlaceSel = iS >= 0 ? 0 : 1;
+            else if (m_Gizmo.m_Tool != tg::TOOL_NONE && (iS >= 0 || iD >= 0) && !tg::Dragging()) ImGui::SetTooltip("click to move the %s skeleton", iS >= 0 ? "source" : "destination");
         }
 
         // One destination bone's row: its name, the Source box (the correction), how it was decided

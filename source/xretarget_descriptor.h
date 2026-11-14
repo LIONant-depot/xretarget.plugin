@@ -21,18 +21,21 @@ namespace xretarget_desc
     };
 
     // Where the editor shows a skeleton: a convenience for the person editing (it changes nothing that is compiled), saved so the next editing session finds the skeletons as they were left.
-    // Move is from the default place (the source at the origin, the destination beside it); the turn is about the vertical axis.
+    // The same layout as an import pre-transform (Scale, Rotation in degrees, Translation) so the editors' transform gizmo edits it directly; the destination's default place
+    // (beside the source) is added by the editor.
     struct view_place
     {
-        xmath::fvec3    m_Move      = xmath::fvec3::fromZero();
-        float           m_YawDeg    = 0.0f;
-        float           m_Scale     = 1.0f;
+        xmath::fvec3    m_Scale             = xmath::fvec3::fromOne();
+        xmath::fvec3    m_Rotation          = xmath::fvec3::fromZero();
+        xmath::fvec3    m_Translation       = xmath::fvec3::fromZero();
+        bool            m_EditorLockScale   = true;
 
         XPROPERTY_DEF
         ( "ViewPlace", view_place
-        , obj_member<"Move",    &view_place::m_Move >
-        , obj_member<"YawDeg",  &view_place::m_YawDeg >
-        , obj_member<"Scale",   &view_place::m_Scale >
+        , obj_member<"Scale",           &view_place::m_Scale >
+        , obj_member<"Rotation",        &view_place::m_Rotation >
+        , obj_member<"Translation",     &view_place::m_Translation >
+        , obj_member<"EditorLockScale", &view_place::m_EditorLockScale >
         )
     };
     XPROPERTY_REG(view_place)
@@ -109,11 +112,11 @@ namespace xretarget_desc
         ( "Retarget", descriptor
         , obj_member<"Source",              &descriptor::m_Source >
         , obj_member<"Destination",         &descriptor::m_Destination >
+        , obj_member<"SourceView",          &descriptor::m_SourceView >
+        , obj_member<"DestinationView",     &descriptor::m_DestinationView >
         , obj_member<"Travel",              &descriptor::m_Travel, member_enum_span<travel_v> >
         , obj_member<"RegistrationDeg",     &descriptor::m_RegistrationDeg >
         , obj_member<"Overrides",           &descriptor::m_Overrides >
-        , obj_member<"SourceView",          &descriptor::m_SourceView,          member_flags<flags::DONT_SHOW> >
-        , obj_member<"DestinationView",     &descriptor::m_DestinationView,     member_flags<flags::DONT_SHOW> >
         , obj_member<"ResolvedSource",      &descriptor::m_ResolvedSource,      member_flags<flags::DONT_SHOW, flags::DONT_SAVE> >
         , obj_member<"ResolvedDestination", &descriptor::m_ResolvedDestination, member_flags<flags::DONT_SHOW, flags::DONT_SAVE> >
         )
