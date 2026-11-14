@@ -31,6 +31,8 @@ namespace xretarget_editor
         bool                                            m_bReady = false;
         std::vector<xskeleton_editor::bone_world>       m_SourceBones, m_DestinationBones;
         xmath::fvec3                                    m_DestinationOffset = {};
+        float                                           m_SourceRadius = 0, m_DestinationRadius = 0;      // how big each skeleton is (a unit mismatch shows here)
+        std::uint64_t                                   m_LoadedSource = 0, m_LoadedDestination = 0;     // the skeletons the viewport shows: an edit of either reloads it
 
         session(xresource::full_guid Guid, xresource_editor::library::guid LibraryGuid, xgpu::device* pDevice) noexcept
             : descriptor_editor("Retarget", Guid, LibraryGuid, pDevice)
@@ -82,17 +84,20 @@ namespace xretarget_editor
             m_bShowable = false;
         }
 
-        // One skeleton's rest pose as bone worlds, and its centre and radius
-        static void RestBones(const xskeleton::skeleton& S, std::vector<xskeleton_editor::bone_world>& Out, xmath::fvec3& Center, float& Radius) noexcept
+        // One skeleton's rest pose as bone worlds, drawn at a common size: its feet on the ground, centred over the origin, scaled so its radius is 1
+        // (two rigs often come in different units: a Daz character in centimetres beside a metre one). Real is its size in world units, for the numbers.
+        static void RestBones(const xskeleton::skeleton& S, std::vector<xskeleton_editor::bone_world>& Out, float& Real) noexcept
         {
             std::vector<xmath::fmat4> Worlds;
             xgpu::tools::editors::ComputeRestBoneWorlds(S, Worlds);
             Out.resize(Worlds.size());
-            Center = xmath::fvec3(0, 0, 0);
-            for (std::size_t i = 0; i < Worlds.size(); ++i) { Out[i].m_Position = Worlds[i].ExtractPosition(); Out[i].m_Right = Worlds[i].Right(); Out[i].m_Up = Worlds[i].Up(); Center += Out[i].m_Position; }
+            xmath::fvec3 Center(0, 0, 0); float MinY = 1e30f;
+            for (std::size_t i = 0; i < Worlds.size(); ++i) { Out[i].m_Position = Worlds[i].ExtractPosition(); Out[i].m_Right = Worlds[i].Right(); Out[i].m_Up = Worlds[i].Up(); Center += Out[i].m_Position; MinY = std::min(MinY, Out[i].m_Position.m_Y); }
             if (!Worlds.empty()) Center /= float(Worlds.size());
-            Radius = 0.5f;
+            float Radius = 1e-4f;
             for (auto& B : Out) Radius = std::max(Radius, (B.m_Position - Center).Length());
+            Real = Radius;
+            for (auto& B : Out) B.m_Position = xmath::fvec3((B.m_Position.m_X - Center.m_X) / Radius, (B.m_Position.m_Y - MinY) / Radius, (B.m_Position.m_Z - Center.m_Z) / Radius);
         }
 
         void Reload() noexcept
@@ -103,27 +108,27 @@ namespace xretarget_editor
             if (!pDesc) { m_ErrorMessage = "The descriptor could not be read."; return; }
             if (pDesc->m_Source.empty() || pDesc->m_Destination.empty()) { m_ErrorMessage = "Set the Source and the Destination skeleton in the Description panel."; return; }
 
+            m_LoadedSource = pDesc->m_Source.m_Instance.m_Value; m_LoadedDestination = pDesc->m_Destination.m_Instance.m_Value;
             m_SourceRef.m_Instance = pDesc->m_Source.m_Instance;
             m_DestinationRef.m_Instance = pDesc->m_Destination.m_Instance;
             auto* pSource      = xresource::g_Mgr.getResource(m_SourceRef);
             auto* pDestination = xresource::g_Mgr.getResource(m_DestinationRef);
             if (!pSource || !pDestination) { LetGo(); m_ErrorMessage = "A skeleton could not be loaded (compile it first)."; return; }
 
-            xmath::fvec3 CS, CD; float RS = 0, RD = 0;
-            RestBones(*pSource, m_SourceBones, CS, RS);
-            RestBones(*pDestination, m_DestinationBones, CD, RD);
-            // the destination stands to the right of the source, with a gap; the view frames both
-            const float Gap = (RS + RD) * 1.2f;
-            m_DestinationOffset = xmath::fvec3((CS.m_X + Gap) - CD.m_X, 0.0f, 0.0f);
-            const xmath::fvec3 Mid((CS.m_X + (CD.m_X + m_DestinationOffset.m_X)) * 0.5f, (CS.m_Y + CD.m_Y) * 0.5f, (CS.m_Z + CD.m_Z) * 0.5f);
-            m_Viewport.m_Scene.m_Center   = Mid;
-            m_Viewport.m_Scene.m_Radius   = std::max(RS, RD) + Gap * 0.5f;
+            float RS = 0, RD = 0;
+            RestBones(*pSource, m_SourceBones, RS);
+            RestBones(*pDestination, m_DestinationBones, RD);
+            m_SourceRadius = RS; m_DestinationRadius = RD;
+            m_DestinationOffset = xmath::fvec3(2.6f, 0.0f, 0.0f);                       // the destination stands to the right of the source, both of radius 1
+            m_Viewport.m_Scene.m_Center   = xmath::fvec3(1.3f, 0.9f, 0.0f);
+            m_Viewport.m_Scene.m_Radius   = 2.0f;
             m_Viewport.m_Scene.m_bReframe = true;
             m_bShowable = true;
         }
 
         void RenderViewport() noexcept
         {
+            if (auto* pDesc = Desc(); pDesc && (pDesc->m_Source.m_Instance.m_Value != m_LoadedSource || pDesc->m_Destination.m_Instance.m_Value != m_LoadedDestination)) Reload();
             m_CameraToolbar.Render(ImGui::GetContentRegionAvail(), m_Viewport.m_Scene.m_State, [this] { RenderViewportBody(); });
         }
 
@@ -145,6 +150,7 @@ namespace xretarget_editor
         void RenderMapping() noexcept
         {
             if (m_Details.m_Rows.empty()) { ImGui::TextWrapped("%s", "No mapping yet: set both skeletons and compile the resource."); return; }
+            if (m_bShowable) ImGui::Text("real size (radius): source %.3f, destination %.3f (drawn at the same size)", m_SourceRadius, m_DestinationRadius);
             ImGui::Text("%d mapped, %d unmapped (they stay at rest), hip scale %.3f, %s", m_Details.m_nMapped, m_Details.m_nUnmapped, m_Details.m_HipScale, m_Details.m_bUsable ? "usable" : "NOT usable");
             for (const auto& W : m_Details.m_Warnings) ImGui::TextWrapped("! %s", W.c_str());
             if (ImGui::BeginTable("##Mapping", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable))
