@@ -50,6 +50,7 @@ namespace xretarget_editor
         std::vector<int>                                m_SourceFrom, m_DestinationFrom;            // each bone's wedge starts at this bone (-1: none)
         int                                             m_PlaceSel = 1;                             // the skeleton the gizmo moves: 0 source, 1 destination (click one to choose)
         float                                           m_SourceRadius = 0, m_DestinationRadius = 0;      // how big each skeleton is (a unit mismatch shows here)
+        std::uint64_t                                   m_FramedSource = ~0ull, m_FramedDestination = ~0ull;      // the pair the camera was last framed for
         std::uint64_t                                   m_LoadedSource = 0, m_LoadedDestination = 0;     // the skeletons the viewport shows: an edit of either reloads it
 
         // the live mapping (made here, from the descriptor as it is now: no compile needed)
@@ -164,9 +165,14 @@ namespace xretarget_editor
             m_SourceFrom      = xskeleton_editor::DrawParents(*pSource,      xskeleton_editor::JointBones(*pSource));
             m_DestinationFrom = xskeleton_editor::DrawParents(*pDestination, xskeleton_editor::JointBones(*pDestination));
             m_DestinationOffset = xmath::fvec3(2.6f, 0.0f, 0.0f);                       // the destination stands to the right of the source, both of radius 1
-            m_Viewport.m_Scene.m_Center   = xmath::fvec3(1.3f, 0.9f, 0.0f);
-            m_Viewport.m_Scene.m_Radius   = 2.0f;
-            m_Viewport.m_Scene.m_bReframe = true;
+            // the camera is framed when a DIFFERENT pair of skeletons is shown, never because the resource was saved or compiled: the person's view stays where they put it
+            if (m_FramedSource != m_LoadedSource || m_FramedDestination != m_LoadedDestination)
+            {
+                m_FramedSource = m_LoadedSource; m_FramedDestination = m_LoadedDestination;
+                m_Viewport.m_Scene.m_Center   = xmath::fvec3(1.3f, 0.9f, 0.0f);
+                m_Viewport.m_Scene.m_Radius   = 2.0f;
+                m_Viewport.m_Scene.m_bReframe = true;
+            }
             m_bShowable = true;
         }
 
