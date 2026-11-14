@@ -12,6 +12,7 @@ FetchAndPopulate("https://github.com/LIONant-depot/xAnimation.git" "main")
 DefineInterfaceComponent(xretarget_compiler_ "dependencies"
   "source/xretarget_details.h"
   "source/xretarget_descriptor.h"
+  "source/xretarget_mapping.h"
   "source/xretarget.h"
   "source/compiler/xretarget_compiler.cpp"
   "source/compiler/xretarget_compiler.h"
