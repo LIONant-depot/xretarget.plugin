@@ -20,6 +20,23 @@ namespace xretarget_desc
     , xproperty::settings::enum_item("None",         travel::NONE)
     };
 
+    // Where the editor shows a skeleton: a convenience for the person editing (it changes nothing that is compiled), saved so the next editing session finds the skeletons as they were left.
+    // Move is from the default place (the source at the origin, the destination beside it); the turn is about the vertical axis.
+    struct view_place
+    {
+        xmath::fvec3    m_Move      = xmath::fvec3::fromZero();
+        float           m_YawDeg    = 0.0f;
+        float           m_Scale     = 1.0f;
+
+        XPROPERTY_DEF
+        ( "ViewPlace", view_place
+        , obj_member<"Move",    &view_place::m_Move >
+        , obj_member<"YawDeg",  &view_place::m_YawDeg >
+        , obj_member<"Scale",   &view_place::m_Scale >
+        )
+    };
+    XPROPERTY_REG(view_place)
+
     // A correction of the automatic mapping, by bone NAME (the names are what survives a skeleton being compiled again)
     struct bone_override
     {
@@ -85,6 +102,7 @@ namespace xretarget_desc
         xmath::fvec3                    m_RegistrationDeg = xmath::fvec3::fromZero();   // turn of the source's model frame into the destination's (degrees, XYZ)
         std::vector<bone_override>      m_Overrides     = {};   // the user's corrections of the automatic mapping
 
+        view_place                      m_SourceView, m_DestinationView;                // where the editor shows the two skeletons (editing convenience only)
         xskeleton_desc::bone_manifest   m_ResolvedSource, m_ResolvedDestination;      // NOT saved: read in Serialize()
 
         XPROPERTY_VDEF
@@ -94,6 +112,8 @@ namespace xretarget_desc
         , obj_member<"Travel",              &descriptor::m_Travel, member_enum_span<travel_v> >
         , obj_member<"RegistrationDeg",     &descriptor::m_RegistrationDeg >
         , obj_member<"Overrides",           &descriptor::m_Overrides >
+        , obj_member<"SourceView",          &descriptor::m_SourceView,          member_flags<flags::DONT_SHOW> >
+        , obj_member<"DestinationView",     &descriptor::m_DestinationView,     member_flags<flags::DONT_SHOW> >
         , obj_member<"ResolvedSource",      &descriptor::m_ResolvedSource,      member_flags<flags::DONT_SHOW, flags::DONT_SAVE> >
         , obj_member<"ResolvedDestination", &descriptor::m_ResolvedDestination, member_flags<flags::DONT_SHOW, flags::DONT_SAVE> >
         )

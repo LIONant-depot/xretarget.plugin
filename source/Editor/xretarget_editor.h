@@ -39,6 +39,15 @@ namespace xretarget_editor
         bool                                            m_bReady = false;
         std::vector<xskeleton_editor::bone_world>       m_SourceBones, m_DestinationBones;
         xmath::fvec3                                    m_DestinationOffset = {};
+        // the editing modes (the row above the viewport) and the placement of the two skeletons (saved in the descriptor, applied to what is drawn)
+        enum class mode { map, translate, rotate, scale };
+        mode                                            m_Mode = mode::map;
+        std::vector<xskeleton_editor::bone_world>       m_SourceWorld, m_DestinationWorld;          // the rest bones as placed
+        std::vector<int>                                m_SourceFrom, m_DestinationFrom;            // each bone's wedge starts at this bone (-1: none)
+        xretarget_desc::view_place                      m_Place[2];                                 // the working placement while a drag is on
+        bool                                            m_bPlaceDrag = false; int m_PlaceWho = 0, m_PlaceSel = -1;
+        xretarget_desc::view_place                      m_PlaceStart;
+        ImVec2                                          m_PlaceMouse0 = {}; xmath::fvec3 m_PlaceHit0 = {};
         float                                           m_SourceRadius = 0, m_DestinationRadius = 0;      // how big each skeleton is (a unit mismatch shows here)
         std::uint64_t                                   m_LoadedSource = 0, m_LoadedDestination = 0;     // the skeletons the viewport shows: an edit of either reloads it
 
@@ -142,6 +151,8 @@ namespace xretarget_editor
             RestBones(*pSource, m_SourceBones, RS);
             RestBones(*pDestination, m_DestinationBones, RD);
             m_SourceRadius = RS; m_DestinationRadius = RD;
+            m_SourceFrom      = xskeleton_editor::DrawParents(*pSource,      xskeleton_editor::JointBones(*pSource));
+            m_DestinationFrom = xskeleton_editor::DrawParents(*pDestination, xskeleton_editor::JointBones(*pDestination));
             m_DestinationOffset = xmath::fvec3(2.6f, 0.0f, 0.0f);                       // the destination stands to the right of the source, both of radius 1
             m_Viewport.m_Scene.m_Center   = xmath::fvec3(1.3f, 0.9f, 0.0f);
             m_Viewport.m_Scene.m_Radius   = 2.0f;
@@ -254,8 +265,60 @@ namespace xretarget_editor
         // Panels
         //----------------------------------------------------------------------------------------
 
+        // The placed bones of one skeleton: its rest bones turned about the vertical axis, scaled, and moved (from its default place)
+        void PlaceBones(int Who, const std::vector<xskeleton_editor::bone_world>& Rest, std::vector<xskeleton_editor::bone_world>& Out) const noexcept
+        {
+            const auto& V = Who == 0 ? Desc2()->m_SourceView : Desc2()->m_DestinationView;
+            const auto& W = m_bPlaceDrag ? m_Place[Who] : V;
+            const float Rad = W.m_YawDeg * 3.14159265f / 180.0f, C = std::cos(Rad), S = std::sin(Rad);
+            const xmath::fvec3 Base = Who == 0 ? xmath::fvec3(0, 0, 0) : m_DestinationOffset;
+            auto Turn = [&](const xmath::fvec3& P) { return xmath::fvec3(C * P.m_X + S * P.m_Z, P.m_Y, -S * P.m_X + C * P.m_Z); };
+            Out = Rest;
+            for (auto& B : Out) { B.m_Position = Base + W.m_Move + Turn(B.m_Position * W.m_Scale); B.m_Right = Turn(B.m_Right); B.m_Up = Turn(B.m_Up); }
+        }
+        const desc* Desc2() const noexcept { return m_Document.isLoaded() ? static_cast<const desc*>(m_Document.m_pDescriptor.get()) : nullptr; }
+
+        // The middle of a bone as drawn: the wedge runs from the bone toward its child (the longest one when it has several), so the links attach halfway along it
+        xmath::fvec3 Mid(bool bSource, int i) const noexcept
+        {
+            const auto& W = bSource ? m_SourceWorld : m_DestinationWorld; const auto& F = bSource ? m_SourceFrom : m_DestinationFrom;
+            int Best = -1; float Len = -1;
+            for (int c = 0; c < static_cast<int>(F.size()); ++c) if (F[c] == i) { const float L = (W[c].m_Position - W[i].m_Position).Length(); if (L > Len) { Len = L; Best = c; } }
+            return Best >= 0 ? (W[i].m_Position + W[Best].m_Position) * 0.5f : W[i].m_Position;
+        }
+
+        // Where the mouse ray meets the horizontal plane at height Y
+        xmath::fvec3 GroundHit(const ImVec2& Mouse, float Y) noexcept
+        {
+            const auto O = m_Viewport.m_Scene.m_View.getPosition(); const auto Dir = m_Viewport.m_Scene.m_View.RayFromScreen(Mouse.x, Mouse.y);
+            if (std::fabs(Dir.m_Y) < 1e-4f) return O;
+            const float T = (Y - O.m_Y) / Dir.m_Y; return O + Dir * T;
+        }
+
+        // A placement change committed to the descriptor (undoable): only the fields that moved
+        void CommitPlace(int Who) noexcept
+        {
+            const auto& Now = m_Place[Who]; const auto& Was = m_PlaceStart;
+            const char* Root = Who == 0 ? "Retarget/SourceView" : "Retarget/DestinationView";
+            auto Set = [&](const std::string& P, float V, float B) { if (V != B) xeditor::Run(m_Undo, std::format("SetProperty -Path {} -Value {} -Before {}", xeditor::Quote(P), xeditor::Quote(std::format("{}", V)), xeditor::Quote(std::format("{}", B)))); };
+            Set(std::format("{}/Move/X", Root), Now.m_Move.m_X, Was.m_Move.m_X); Set(std::format("{}/Move/Y", Root), Now.m_Move.m_Y, Was.m_Move.m_Y); Set(std::format("{}/Move/Z", Root), Now.m_Move.m_Z, Was.m_Move.m_Z);
+            Set(std::format("{}/YawDeg", Root), Now.m_YawDeg, Was.m_YawDeg); Set(std::format("{}/Scale", Root), Now.m_Scale, Was.m_Scale);
+        }
+
         void RenderViewport() noexcept
         {
+            // the modes: what the left mouse button does in the viewport
+            {
+                static const char* Names[] = { "Map", "Translate", "Rotate", "Scale" };
+                static const char* Tips[]  = { "Drag from a bone of one skeleton onto a bone of the other to map them", "Drag a skeleton to move it (hold Shift to lift it)", "Drag a skeleton sideways to turn it", "Drag a skeleton up or down to make it smaller or bigger" };
+                for (int i = 0; i < 4; ++i)
+                {
+                    if (i) ImGui::SameLine();
+                    if (ImGui::Selectable(Names[i], m_Mode == static_cast<mode>(i), 0, ImVec2(70, 0))) { m_Mode = static_cast<mode>(i); m_bDragging = false; m_bPlaceDrag = false; }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", Tips[i]);
+                }
+                ImGui::SameLine(); ImGui::TextDisabled("(how the skeletons are placed here is saved with the resource; it changes nothing that is compiled)");
+            }
             if (auto* pDesc = Desc(); pDesc && (pDesc->m_Source.m_Instance.m_Value != m_LoadedSource || pDesc->m_Destination.m_Instance.m_Value != m_LoadedDestination)) Reload();
             m_CameraToolbar.Render(ImGui::GetContentRegionAvail(), m_Viewport.m_Scene.m_State, [this] { RenderViewportBody(); });
         }
@@ -271,9 +334,11 @@ namespace xretarget_editor
             if (!pSource || !pDestination) return;
 
             RefreshLive();
+            if (!Desc2()) return;
+            PlaceBones(0, m_SourceBones, m_SourceWorld); PlaceBones(1, m_DestinationBones, m_DestinationWorld);
             xskeleton_editor::viewport_item Items[2] =
-            { { .m_pSkeleton = pSource,      .m_Bones = m_SourceBones,      .m_NormalColor = IM_COL32(255, 200, 120, 255), .m_pSelected = &m_SelSource }                                          // source: warm
-            , { .m_pSkeleton = pDestination, .m_Bones = m_DestinationBones, .m_Offset = m_DestinationOffset, .m_NormalColor = IM_COL32(150, 220, 255, 255), .m_pSelected = &m_SelDestination } };   // destination: cool
+            { { .m_pSkeleton = pSource,      .m_Bones = m_SourceWorld,      .m_NormalColor = IM_COL32(255, 200, 120, 255), .m_pSelected = &m_SelSource }                                          // source: warm
+            , { .m_pSkeleton = pDestination, .m_Bones = m_DestinationWorld, .m_NormalColor = IM_COL32(150, 220, 255, 255), .m_pSelected = &m_SelDestination } };   // destination: cool
 
             // the bone under the mouse (last frame's view: the pick is one frame behind, which no hand notices). The nearer of the two skeletons wins.
             const ImVec2 Mouse = ImGui::GetMousePos();
@@ -333,19 +398,19 @@ namespace xretarget_editor
                     const int S = Map[T];
                     if (S < 0 || S >= static_cast<int>(m_SourceBones.size())) return;
                     ImVec2 A, B;
-                    if (m_Viewport.Project(m_SourceBones[S].m_Position, A) && m_Viewport.Project(m_DestinationBones[T].m_Position + m_DestinationOffset, B)) pDraw->AddLine(A, B, Color, Thick);
+                    if (m_Viewport.Project(Mid(true, S), A) && m_Viewport.Project(Mid(false, T), B)) pDraw->AddLine(A, B, Color, Thick);
                 };
                 if (m_bShowAllLinks) for (int T = 0; T < static_cast<int>(m_DestinationBones.size()); ++T) Link(T, IM_COL32(255, 255, 255, 50), 1.0f);
                 if (m_iSelected >= 0) Link(m_iSelected, IM_COL32(120, 255, 160, 230), 2.0f);
                 for (const int T : Linked) Link(T, IM_COL32(255, 255, 255, 255), 2.5f);
 
                 // drag and drop: press on a bone of one skeleton, release on a bone of the other
-                if (!m_bDragging && m_Viewport.Over() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && (iS >= 0 || iD >= 0))
+                if (m_Mode == mode::map && !m_bDragging && m_Viewport.Over() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && (iS >= 0 || iD >= 0))
                 { m_bDragging = true; m_bDragFromSource = iS >= 0; m_DragBone = iS >= 0 ? iS : iD; }
                 if (m_bDragging)
                 {
                     ImVec2 From;
-                    const xmath::fvec3 P = m_bDragFromSource ? m_SourceBones[m_DragBone].m_Position : m_DestinationBones[m_DragBone].m_Position + m_DestinationOffset;
+                    const xmath::fvec3 P = Mid(m_bDragFromSource, m_DragBone);
                     const int iOther = m_bDragFromSource ? iD : iS;          // the bone of the OTHER skeleton under the mouse
                     if (m_Viewport.Project(P, From))
                     {
@@ -386,6 +451,35 @@ namespace xretarget_editor
                 }
             }
             if (m_bDragging && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) { m_bDragging = false; m_DragBone = -1; }
+
+            // translate / rotate / scale: press on a skeleton (or anywhere, with one already chosen) and drag
+            if (m_Mode != mode::map)
+            {
+                if (m_Viewport.Over() && !m_bPlaceDrag && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+                {
+                    if (iS >= 0 || iD >= 0) m_PlaceSel = iS >= 0 ? 0 : 1;
+                    if (m_PlaceSel >= 0)
+                    {
+                        const auto* pD = Desc2();
+                        m_bPlaceDrag = true; m_PlaceWho = m_PlaceSel; m_Place[0] = pD->m_SourceView; m_Place[1] = pD->m_DestinationView;
+                        m_PlaceStart = m_Place[m_PlaceWho]; m_PlaceMouse0 = Mouse; m_PlaceHit0 = GroundHit(Mouse, 0.0f);
+                    }
+                }
+                if (m_bPlaceDrag)
+                {
+                    auto& W = m_Place[m_PlaceWho];
+                    if (m_Mode == mode::translate)
+                    {
+                        if (ImGui::GetIO().KeyShift) W.m_Move.m_Y = m_PlaceStart.m_Move.m_Y - (Mouse.y - m_PlaceMouse0.y) * 0.005f * m_Viewport.m_Scene.m_Radius;
+                        else { const auto H = GroundHit(Mouse, 0.0f); W.m_Move.m_X = m_PlaceStart.m_Move.m_X + (H.m_X - m_PlaceHit0.m_X); W.m_Move.m_Z = m_PlaceStart.m_Move.m_Z + (H.m_Z - m_PlaceHit0.m_Z); }
+                    }
+                    else if (m_Mode == mode::rotate) W.m_YawDeg = m_PlaceStart.m_YawDeg + (Mouse.x - m_PlaceMouse0.x) * 0.5f;
+                    else W.m_Scale = std::max(0.05f, m_PlaceStart.m_Scale * std::exp(-(Mouse.y - m_PlaceMouse0.y) * 0.005f));
+                    ImGui::SetTooltip("%s: move %.2f, %.2f, %.2f  turn %.1f deg  scale %.2f", m_PlaceWho ? "destination" : "source", W.m_Move.m_X, W.m_Move.m_Y, W.m_Move.m_Z, W.m_YawDeg, W.m_Scale);
+                    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) { CommitPlace(m_PlaceWho); m_bPlaceDrag = false; }
+                }
+                else if (iS >= 0 || iD >= 0) ImGui::SetTooltip("%s skeleton: press and drag to %s it", iS >= 0 ? "source" : "destination", m_Mode == mode::translate ? "move" : m_Mode == mode::rotate ? "turn" : "scale");
+            }
         }
 
         // One destination bone's row: its name, the Source box (the correction), how it was decided
