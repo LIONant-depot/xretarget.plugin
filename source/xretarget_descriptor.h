@@ -4,6 +4,7 @@
 
 #include "plugins/xskeleton.plugin/source/xskeleton_xgpu_rsc_loader.h"
 #include "plugins/xskeleton.plugin/source/xskeleton_bone_manifest.h"
+#include "plugins/xskeleton.plugin/source/xskeleton_descriptor.h"
 #include "xretarget.h"
 #include "xretarget_details.h"
 #include <format>
@@ -23,22 +24,7 @@ namespace xretarget_desc
     // Where the editor shows a skeleton: a convenience for the person editing (it changes nothing that is compiled), saved so the next editing session finds the skeletons as they were left.
     // The same layout as an import pre-transform (Scale, Rotation in degrees, Translation) so the editors' transform gizmo edits it directly; the destination's default place
     // (beside the source) is added by the editor.
-    struct view_place
-    {
-        xmath::fvec3    m_Scale             = xmath::fvec3::fromOne();
-        xmath::fvec3    m_Rotation          = xmath::fvec3::fromZero();
-        xmath::fvec3    m_Translation       = xmath::fvec3::fromZero();
-        bool            m_EditorLockScale   = true;
-
-        XPROPERTY_DEF
-        ( "ViewPlace", view_place
-        , obj_member<"Scale",           &view_place::m_Scale >
-        , obj_member<"Rotation",        &view_place::m_Rotation >
-        , obj_member<"Translation",     &view_place::m_Translation >
-        , obj_member<"EditorLockScale", &view_place::m_EditorLockScale >
-        )
-    };
-    XPROPERTY_REG(view_place)
+    using view_place = xskeleton_desc::transform;      // the skeleton resource's own pre-transform layout (with its Scale lock): the same editing in the inspector and the gizmo
 
     // A correction of the automatic mapping, by bone NAME (the names are what survives a skeleton being compiled again)
     struct bone_override
@@ -111,8 +97,8 @@ namespace xretarget_desc
         XPROPERTY_VDEF
         ( "Retarget", descriptor
         , obj_member<"Source",              &descriptor::m_Source >
-        , obj_member<"Destination",         &descriptor::m_Destination >
         , obj_member<"SourceView",          &descriptor::m_SourceView >
+        , obj_member<"Destination",         &descriptor::m_Destination >
         , obj_member<"DestinationView",     &descriptor::m_DestinationView >
         , obj_member<"Travel",              &descriptor::m_Travel, member_enum_span<travel_v> >
         , obj_member<"RegistrationDeg",     &descriptor::m_RegistrationDeg >

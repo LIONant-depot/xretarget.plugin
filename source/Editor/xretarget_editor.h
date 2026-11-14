@@ -19,6 +19,7 @@
 #include "dependencies/xresource_pipeline_v2/source/editor/xresource_editor_resources.h"
 #include "plugins/xskeleton.plugin/source/Editor/xskeleton_viewport.h"
 #include "source/Tools/Editor/xeditor_transform_gizmo.h"
+#include "dependencies/xeditor/include/xeditor/widgets.h"
 #include "plugins/xretarget.plugin/source/xretarget_descriptor.h"
 #include "plugins/xretarget.plugin/source/xretarget_mapping.h"
 #include "dependencies/xAnimation/source/retarget/xanimation_mirror.h"
@@ -55,14 +56,23 @@ namespace xretarget_editor
         xretarget_desc::mapping                         m_Live;
         bool                                            m_bLive = false;
         std::string                                     m_LiveSignature;
-        ImGuiTextFilter                                 m_DestinationFilter, m_SourceFilter;
+        ImGuiTextFilter                                 m_DestinationFilter, m_SourceFilter;      // (their grammar, fed by the editors' standard search box below)
+        std::string                                     m_DestinationText, m_SourceText;
+        // The editors' standard search box (the magnifier, the X, the rounded input) driving an ImGuiTextFilter, so the richer search stays: words must all match, -word excludes, a comma separates alternatives
+        static bool SearchBox(std::string& Text, ImGuiTextFilter& F, float Width, bool bFocus = false) noexcept
+        {
+            const bool bChanged = xeditor::RenderTreeSearchBar(Text, Width, bFocus, "Search: every word must match; -word leaves out what matches it; a comma separates alternatives (thigh,calf -twist)");
+            if (bChanged) { std::snprintf(F.InputBuf, sizeof(F.InputBuf), "%s", Text.c_str()); F.Build(); }
+            return bChanged;
+        }
         int                                             m_iHover = -1, m_iSelected = -1;               // destination bone indices: the row under the mouse, the row clicked
         bool                                            m_bShowAllLinks = false, m_bOnlyUnmapped = false;
         std::set<int>                                   m_SelSource, m_SelDestination;
         int                                             m_ViewHoverSource = -1, m_ViewHoverDestination = -1;     // the bones under the mouse in the viewport (the list lights their rows)
         bool                                            m_bDragging = false, m_bDragFromSource = true;           // a mapping line being dragged from a bone of one skeleton to a bone of the other
         int                                             m_DragBone = -1;
-        bool                                            m_bSmartMirror = true;
+        bool                                            m_bSmartMirror = true, m_bOnlyIssues = false;
+        std::string                                     m_UnderMouse;                                         // what the pick saw last frame (for the tests)
         std::string                                     m_Notice; double m_NoticeUntil = 0;                      // what the last action did (the mirror too)
         int                                             m_ScrollRow = -1, m_LastScrolledRow = -1;                // the list follows the viewport's hover
 
@@ -342,8 +352,8 @@ namespace xretarget_editor
             }
             PlaceBones(0, m_SourceBones, m_SourceWorld); PlaceBones(1, m_DestinationBones, m_DestinationWorld);
             xskeleton_editor::viewport_item Items[2] =
-            { { .m_pSkeleton = pSource,      .m_Bones = m_SourceWorld,      .m_NormalColor = IM_COL32(255, 200, 120, 255), .m_pSelected = &m_SelSource }                                          // source: warm
-            , { .m_pSkeleton = pDestination, .m_Bones = m_DestinationWorld, .m_NormalColor = IM_COL32(150, 220, 255, 255), .m_pSelected = &m_SelDestination } };   // destination: cool
+            { { .m_pSkeleton = pSource,      .m_Bones = m_SourceWorld,      .m_NormalColor = IM_COL32(255, 200, 120, 255), .m_pSelected = &m_SelSource, .m_bLeadsToSelected = false }                                          // source: warm
+            , { .m_pSkeleton = pDestination, .m_Bones = m_DestinationWorld, .m_NormalColor = IM_COL32(150, 220, 255, 255), .m_pSelected = &m_SelDestination, .m_bLeadsToSelected = false } };   // destination: cool
 
             // the bone under the mouse (last frame's view: the pick is one frame behind, which no hand notices). The nearer of the two skeletons wins.
             const ImVec2 Mouse = ImGui::GetMousePos();
@@ -462,6 +472,25 @@ namespace xretarget_editor
             else if (m_Gizmo.m_Tool != tg::TOOL_NONE && (iS >= 0 || iD >= 0) && !tg::Dragging()) ImGui::SetTooltip("click to move the %s skeleton", iS >= 0 ? "source" : "destination");
         }
 
+        // What is worth the person's attention about one destination bone, in its own row (the "!" column's tooltip): a slot nobody drives, a pairing that was a guess, and for the
+        // hips the facts that concern the whole body (the skeletons face apart, their sizes differ)
+        std::string RowIssue(int T) const noexcept
+        {
+            static const char* Slots[] = { "none", "root", "hips", "spine", "neck", "head", "clavicle", "upperarm", "lowerarm", "hand", "thigh", "calf", "foot", "toe" };
+            const auto& Row = m_Live.m_Details.m_Rows[T];
+            std::string Out;
+            auto Add = [&](const std::string& L) { if (!Out.empty()) Out += "\n"; Out += L; };
+            if (m_Live.m_Auto.m_Map.m_SourceOf[T] < 0)
+            {
+                const auto C = xanimation::details::Classify(m_Live.m_Destination.m_Names[T]);
+                if (C.m_Slot != xanimation::bone_slot::NONE && C.m_Slot != xanimation::bone_slot::ROOT && C.m_Slot != xanimation::bone_slot::TOE)
+                    Add(std::string("This bone is a ") + Slots[int(C.m_Slot)] + " but no source bone drives it: it stays at rest. Drag a source bone onto it, or pick one in the Source box.");
+            }
+            if (!Row.m_Note.empty()) Add(Row.m_Note);
+            if (Row.m_Slot == "hips") for (const auto& W : m_Live.m_Details.m_Warnings) if (W.find("face different") != std::string::npos || W.find("sizes differ") != std::string::npos) Add(W);
+            return Out;
+        }
+
         // One destination bone's row: its name, the Source box (the correction), how it was decided
         void RenderRow(int T) noexcept
         {
@@ -473,15 +502,27 @@ namespace xretarget_editor
             if (T == m_ViewHoverDestination || (m_ViewHoverSource >= 0 && S == m_ViewHoverSource)) ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, IM_COL32(90, 140, 210, 110));       // the viewport's hover, lit in the list
             if (T == m_ScrollRow && m_ScrollRow != m_LastScrolledRow) { ImGui::SetScrollHereY(0.5f); m_LastScrolledRow = m_ScrollRow; }
             ImGui::TableNextColumn();
+            const std::string Issue = RowIssue(T);
+            if (!Issue.empty())      // a warning badge (an orange disc with a mark) the eye finds in the list; the whole badge is the hover target
+            {
+                const ImVec2 C(ImGui::GetCursorScreenPos().x + 7.0f, ImGui::GetCursorScreenPos().y + ImGui::GetTextLineHeight() * 0.5f + 1.0f);
+                auto* pDL = ImGui::GetWindowDrawList();
+                pDL->AddCircleFilled(C, 6.5f, IM_COL32(235, 160, 30, 255));
+                pDL->AddLine(ImVec2(C.x, C.y - 3.5f), ImVec2(C.x, C.y + 0.5f), IM_COL32(30, 20, 0, 255), 1.8f);
+                pDL->AddCircleFilled(ImVec2(C.x, C.y + 3.0f), 1.0f, IM_COL32(30, 20, 0, 255));
+                ImGui::Dummy(ImVec2(14.0f, ImGui::GetTextLineHeight()));
+                if (ImGui::IsItemHovered()) { ImGui::SetTooltip("%s", Issue.c_str()); m_iHover = T; }
+            }
+            ImGui::TableNextColumn();
             if (ImGui::Selectable(Target.c_str(), m_iSelected == T, ImGuiSelectableFlags_AllowOverlap)) m_iSelected = (m_iSelected == T) ? -1 : T;
-            if (ImGui::IsItemHovered()) m_iHover = T;
+            if (ImGui::IsItemHovered()) { m_iHover = T; if (!Issue.empty()) ImGui::SetTooltip("%s", Issue.c_str()); }
 
             ImGui::TableNextColumn();
             ImGui::SetNextItemWidth(-FLT_MIN);
             const std::string Shown = S >= 0 ? std::string(m_Live.m_Source.m_Names[S]) : std::string("(none: stays at rest)");
             if (ImGui::BeginCombo("##src", Shown.c_str()))
             {
-                m_SourceFilter.Draw("filter", 160.0f);
+                SearchBox(m_SourceText, m_SourceFilter, 220.0f, ImGui::IsWindowAppearing());
                 if (ImGui::Selectable("(none: stays at rest)", S < 0)) Apply(T, -1, pick::none);
                 if (Overridden(Target) && ImGui::Selectable("(automatic)")) Apply(T, -1, pick::automatic);
                 ImGui::Separator();
@@ -518,14 +559,20 @@ namespace xretarget_editor
             const auto& D = m_Live.m_Details;
             ImGui::Text("%d of %d destination bones driven, %s", D.m_nMapped, D.m_nMapped + D.m_nUnmapped, D.m_bUsable ? "usable" : "NOT usable (no hips or no limb)");
             ImGui::TextDisabled("real size (radius): source %.3f, destination %.3f; hip scale %.3f; drawn at the same size", m_SourceRadius, m_DestinationRadius, D.m_HipScale);
-            for (const auto& W : D.m_Warnings) ImGui::TextWrapped("! %s", W.c_str());
+            {   // the warnings that sit on a bone are in its row ("!" column): here only what belongs to no bone, and how many rows have something to read
+                for (const auto& W : D.m_Warnings)
+                {
+                    const bool bInRow = W.find("no source bone for target slot") == 0 || W.find("target bones have no source") != std::string::npos || W.find("face different") != std::string::npos || W.find("sizes differ") != std::string::npos;
+                    if (!bInRow) ImGui::TextWrapped("! %s", W.c_str());
+                }
+            }
 
             ImGui::Separator();
-            ImGui::TextWrapped("In the viewport: hover a bone of either skeleton to see its name and its links; press on a bone of one skeleton and drag onto a bone of the other to map them. In the list: hover a row to light its two bones; open its Source box to pick another bone, (none) (the bone stays at rest) or (automatic) (takes your correction back).");
             ImGui::Checkbox("smart mirror", &m_bSmartMirror); ImGui::SameLine(); ImGui::TextDisabled("(the mirrored pair is mapped too: left <-> right, found by name)");
             if (ImGui::GetTime() < m_NoticeUntil) ImGui::TextColored(ImVec4(0.55f, 1.0f, 0.65f, 1.0f), "%s", m_Notice.c_str());
-            m_DestinationFilter.Draw("find a destination bone", 220.0f);
+            SearchBox(m_DestinationText, m_DestinationFilter, 260.0f);
             ImGui::SameLine(); ImGui::Checkbox("only unmapped", &m_bOnlyUnmapped);
+            ImGui::SameLine(); ImGui::Checkbox("only with !", &m_bOnlyIssues);
             ImGui::SameLine(); ImGui::Checkbox("show all links", &m_bShowAllLinks);
             if (!pDesc->m_Overrides.empty())
             {
@@ -534,9 +581,10 @@ namespace xretarget_editor
                 ImGui::SameLine(); ImGui::TextDisabled("(%d yours)", int(pDesc->m_Overrides.size()));
             }
 
-            if (ImGui::BeginTable("##Mapping", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable))
+            if (ImGui::BeginTable("##Mapping", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable))
             {
                 ImGui::TableSetupScrollFreeze(0, 1);
+                ImGui::TableSetupColumn("!", ImGuiTableColumnFlags_WidthFixed, 16.0f);
                 ImGui::TableSetupColumn("Destination bone", ImGuiTableColumnFlags_WidthStretch, 1.0f);
                 ImGui::TableSetupColumn("Driven by (source bone)", ImGuiTableColumnFlags_WidthStretch, 1.3f);
                 ImGui::TableSetupColumn("Slot", ImGuiTableColumnFlags_WidthFixed, 90.0f);
@@ -545,6 +593,7 @@ namespace xretarget_editor
                 for (int T = 0; T < static_cast<int>(D.m_Rows.size()); ++T)
                 {
                     if (m_bOnlyUnmapped && m_Live.m_Auto.m_Map.m_SourceOf[T] >= 0) continue;
+                    if (m_bOnlyIssues && RowIssue(T).empty()) continue;
                     if (!m_DestinationFilter.PassFilter(D.m_Rows[T].m_Target.c_str())) continue;
                     RenderRow(T);
                 }
