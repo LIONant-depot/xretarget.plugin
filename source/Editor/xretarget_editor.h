@@ -98,7 +98,7 @@ namespace xretarget_editor
 
         void OnDescriptorReplaced() noexcept override { m_LiveSignature.clear(); Reload(); }
         void OnCompileStarted()     noexcept override { LetGo(); }
-        void OnCompiled()           noexcept override { LoadDetails(); m_LiveSignature.clear(); Reload(); }
+        void OnCompiled()           noexcept override { LoadDetails(); m_LiveSignature.clear(); m_ManifestSource = m_ManifestDestination = ~0ull; Reload(); }
 
         void LetGo() noexcept
         {
@@ -162,10 +162,19 @@ namespace xretarget_editor
             return S;
         }
 
+        std::uint64_t m_ManifestSource = ~0ull, m_ManifestDestination = ~0ull;
         void RefreshLive() noexcept
         {
             auto* pDesc = Desc();
             if (!pDesc) { m_bLive = false; return; }
+            // the bone lists are read when the file is loaded: a skeleton picked since (or compiled since) is read here
+            auto Read = [&](auto& Out, const auto& Ref, std::uint64_t& Seen)
+            {
+                if (Ref.m_Instance.m_Value == Seen) return;
+                Seen = Ref.m_Instance.m_Value; Out = {};
+                if (!Ref.empty()) if (auto Err = desc::ReadManifest(Out, Ref, m_Document.m_DescriptorPath); Err) Out = {};
+            };
+            Read(pDesc->m_ResolvedSource, pDesc->m_Source, m_ManifestSource); Read(pDesc->m_ResolvedDestination, pDesc->m_Destination, m_ManifestDestination);
             const auto Sig = Signature(*pDesc);
             if (Sig == m_LiveSignature) return;
             m_LiveSignature = Sig;
