@@ -40,8 +40,12 @@ namespace xretarget_desc
     struct mapping
     {
         skeleton_data                   m_Source, m_Destination;
+        xanimation::pose                m_SourceCalibration, m_DestinationCalibration;   // each skeleton's calibration pose (limbs along the family directions): what the transfer treats as the rest
+        xanimation::rest_skeleton       sourceCalibrated(void) const noexcept      { return { { std::span<const std::int32_t>(m_Source.m_Parent) }, &m_SourceCalibration }; }
+        xanimation::rest_skeleton       destinationCalibrated(void) const noexcept { return { { std::span<const std::int32_t>(m_Destination.m_Parent) }, &m_DestinationCalibration }; }
         xanimation::auto_map_result     m_Auto;                 // the final map is m_Auto.m_Map (overrides and policies applied)
         details                         m_Details;
+        float                           m_AutoFacingDeg = 0.0f; // the registration measured from the two facings (about Y)
         std::vector<std::string>        m_Reviewed;             // per destination bone: why the user's override applies ("" none)
     };
 
@@ -65,6 +69,12 @@ namespace xretarget_desc
         if (Src.m_Parent.empty() || Dst.m_Parent.empty())
             return xerr::create_f<xresource_pipeline::state, "A skeleton has no bones (has it been compiled?)">();
 
+        // 0. each skeleton's calibration pose: its rest with the limbs, spine and neck brought along the family's directions, so an A-pose rig and a T-pose rig are
+        //    compared in the same stance (the rest poses themselves, and the skins' bind poses, are never changed)
+        //    (each in its own facing: the limbs go out along ITS left, so a skeleton authored facing another way is calibrated in its own frame and the registration is the turn between the two)
+        M.m_SourceCalibration      = xanimation::SeedCalibrationPose(Src.rest().m_Skel, Src.m_Names, Src.m_Rest, xanimation::MeasureFacingDeg(Src.rest().m_Skel, Src.m_Names, Src.m_Rest));
+        M.m_DestinationCalibration = xanimation::SeedCalibrationPose(Dst.rest().m_Skel, Dst.m_Names, Dst.m_Rest, xanimation::MeasureFacingDeg(Dst.rest().m_Skel, Dst.m_Names, Dst.m_Rest));
+
         // 1. automatic mapping from the names and the hierarchy (xAnimation retarget)
         M.m_Auto = xanimation::AutoMapBones(Src.rest(), Src.m_Names, Dst.rest(), Dst.m_Names);
         auto& Auto = M.m_Auto;
@@ -84,17 +94,34 @@ namespace xretarget_desc
 
         // 3. policies
         Auto.m_Map.m_Travel = static_cast<xanimation::travel_policy>(D.m_Travel);
+        // The model frames: two skeletons authored facing different ways (a PreTransform not finished, or two tools' conventions) need the turn between them or every limb
+        // swings about the wrong axis. It is measured from the facing of the two calibrated rests (the left foot to its toe) and applied automatically; the descriptor's
+        // RegistrationDeg is a correction ON TOP of it (zero by default).
+        float AutoFacingDeg = 0.0f;
+        xmath::fquat AutoReg = xmath::fquat::fromIdentity();
+        {
+            const auto Raw = xanimation::CompareFrames(M.sourceCalibrated(), M.destinationCalibrated(), Auto);
+            if (Raw.m_bHaveFacing && std::fabs(Raw.m_FacingDeg) > 5.0f)
+            {
+                AutoFacingDeg = Raw.m_FacingDeg; AutoReg.setupRotationY(xmath::radian{ AutoFacingDeg * 0.017453292f });
+                Auto.m_Warnings.push_back(std::format("the skeletons face different ways ({:.1f} degrees about Y): a registration of that turn is applied automatically", AutoFacingDeg));
+            }
+        }
         {
             const auto E = D.m_RegistrationDeg; const float K = 0.017453292f;     // XYZ Euler, degrees: X first, then Y, then Z
             xmath::fquat X, Y, Z; X.setupRotationX(xmath::radian{ E.m_X * K }); Y.setupRotationY(xmath::radian{ E.m_Y * K }); Z.setupRotationZ(xmath::radian{ E.m_Z * K });
-            Auto.m_Map.m_Registration = Z * Y * X;
+            Auto.m_Map.m_Registration = (Z * Y * X) * AutoReg;
         }
+        M.m_AutoFacingDeg = AutoFacingDeg;
         if (Auto.m_Map.m_SrcHips >= static_cast<int>(Src.m_Parent.size()) || Auto.m_Map.m_TgtHips >= static_cast<int>(Dst.m_Parent.size()))
             return xerr::create_f<xresource_pipeline::state, "Hips index out of range">();
 
+        // do the two skeletons agree on size and facing? (their PreTransforms should have normalized them)
+        for (const auto& W : xanimation::CompareFrames(M.sourceCalibrated(), M.destinationCalibrated(), Auto, Auto.m_Map.m_Registration).m_Warnings) Auto.m_Warnings.push_back(W);     // what still disagrees AFTER the registration
+
         // 4. the numbers that follow, and the editor's view
         xanimation::retargeter R;
-        R.Init(Src.rest(), Dst.rest(), Auto.m_Map);
+        R.Init(M.sourceCalibrated(), M.destinationCalibrated(), Auto.m_Map);
         M.m_Details = {};
         M.m_Details.m_Warnings = Auto.m_Warnings; M.m_Details.m_bUsable = Auto.m_bUsable; M.m_Details.m_HipScale = R.hipScale();
         for (int t = 0; t < static_cast<int>(Dst.m_Parent.size()); ++t)
