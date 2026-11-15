@@ -90,6 +90,7 @@ namespace xretarget_desc
         travel                          m_Travel        = travel::PROPORTIONAL;
         xmath::fvec3                    m_RegistrationDeg = xmath::fvec3::fromZero();   // turn of the source's model frame into the destination's (degrees, XYZ)
         std::vector<bone_override>      m_Overrides     = {};   // the user's corrections of the automatic mapping
+        bool                            m_bPlantFeet    = false; // contact fix-up stage: over the source's foot contacts, the baked feet are held in place (leg IK)
 
         view_place                      m_SourceView, m_DestinationView;                // where the editor shows the two skeletons (editing convenience only)
         xskeleton_desc::bone_manifest   m_ResolvedSource, m_ResolvedDestination;      // NOT saved: read in Serialize()
@@ -103,6 +104,7 @@ namespace xretarget_desc
         , obj_member<"Travel",              &descriptor::m_Travel, member_enum_span<travel_v> >
         , obj_member<"RegistrationDeg",     &descriptor::m_RegistrationDeg >
         , obj_member<"Overrides",           &descriptor::m_Overrides >
+        , obj_member<"PlantFeet",           &descriptor::m_bPlantFeet, member_help<"Contact fix-up: where the SOURCE clip has a foot planted, the retargeted foot is held at one place (its height, roll and rotation kept; the leg bends to reach it). The compile log shows the skate before and after"> >
         , obj_member<"ResolvedSource",      &descriptor::m_ResolvedSource,      member_flags<flags::DONT_SHOW, flags::DONT_SAVE> >
         , obj_member<"ResolvedDestination", &descriptor::m_ResolvedDestination, member_flags<flags::DONT_SHOW, flags::DONT_SAVE> >
         )
